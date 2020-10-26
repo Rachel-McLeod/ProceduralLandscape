@@ -1,0 +1,676 @@
+import maya.cmds as cmds
+import math as math
+import functools
+import random
+import maya.mel as mel
+import os
+path = os.environ['MAYA_APP_DIR']
+
+#This section is for the UI
+#######################################################################################################################################################################################################################################
+
+def checkUI():
+	# check for existing window
+	windowID = "Options"
+	if cmds.window("Options", exists = True): # If an options window is already open, it is deleted
+		cmds.deleteUI(windowID)
+
+def createUI():
+	# creates option window
+	Options = cmds.window("Options ", title = "Options",widthHeight=(500,400))
+	
+	# sets the layout for the options menu
+	cmds.columnLayout(adjustableColumn=True)
+  	cmds.separator()
+	cmds.text('Terrain settings')
+	planeSize = cmds.intSliderGrp('PlaneSize', label = 'Terrain size', minValue=10, maxValue=20, value=12, field=True)
+	gradient = cmds.floatSliderGrp('Height', label = 'Terrain height', minValue=0.000, maxValue=7.000, value=4.00, field=True)
+	cmds.separator()
+	cmds.text('Tree type settings')
+	oakDensity = cmds.floatSliderGrp('OakDensity', label = 'Oak density', minValue=0.000, maxValue=1.000, value=0.500, field=True)
+	pineDensity = cmds.floatSliderGrp('PineDensity', label = 'Pine density', minValue=0.000, maxValue=1.000, value=0.400, field=True)
+	cmds.separator()
+	cmds.text('Oak tree settings')
+	iterations = cmds.checkBox('NumIter', label = 'include 3 iteration trees', enable = True, v=True)
+	angle = cmds.intSliderGrp('Angle', label = 'Average branch angle', minValue=10, maxValue=270, value=40, field=True)
+	deltaAngle = cmds.intSliderGrp('AngleVariation', label = 'Variation in branch angle', minValue=10, maxValue=70, value=40, field=True)
+	subdivisions = cmds.intSliderGrp('subdivisions', label = 'No. branch subdivisions', minValue=3, maxValue=16, value=4, field=True)
+	cmds.separator()
+	cmds.text('leaf type')
+	Box = cmds.checkBox('Models', label = 'use models for leaves', enable = True, v=True)
+
+	cmds.button('clear', command = functools.partial(clearProc)) #adds a function button to clear the scene
+	cmds.button('start', command = lambda *args: terrain())  # starts the main program to create a landscape
+	cmds.button('tree', command = lambda *args: buildTree([2,2,2], 1, 1, 1, str(1))) ##iterations, Angle, coord, deltaAngle, *pArgs):
+	
+	cmds.showWindow(Options)
+	
+def clearProc(*pArgs):  # Clears the whole scene including namespaces
+	cmds.select(all=True)
+	cmds.delete()
+	cmds.namespace(set =':')
+	NamespaceList = cmds.namespaceInfo(':', listOnlyNamespaces = True,recurse=True)
+	for i in range (len(NamespaceList)-2):
+		try:
+			cmds.namespace(rm=str(NamespaceList[i+2]),dnc=True)
+		except:
+			print 'Trying to delete namespace '+str(NamespaceList[i+2])
+	
+def getVariable(name, type, *pArgs):  # When passed the name of a UI slider, this function returns the slider's value
+	if type == 1:  # The integer 'type' is used to indicate what type of UI element to query
+		variable = cmds.intSliderGrp(name, query=True, value=True)
+	elif type ==2:
+		variable = cmds.floatSliderGrp(name, query=True, value=True)
+	elif type ==3:
+		variable = cmds.checkBox(name, query=True, value=True)
+	return variable
+
+
+# This section build trees
+#######################################################################################################################################################################################################################################	
+'''  L-System Generator
+
+  inspired by Janne Kaasalainen's work from http://blog.studioe18.com/69/visualizing-l-systems/'''  
+  
+	#code by Xiaosong Yang starts here
+def addRule(ruleDict, replaceStr, newStr ):
+	''' add a new rule to the ruleDict
+
+	ruleDict		: the dictionary holding the rules
+	replaceStr		: the old character to be replaced
+	newStr			: the new string replacing the old one
+	'''
+	ruleDict[ replaceStr ] = newStr  # Replaces 'X' with the selected base string
+	#code by Xiaosong Yang ends here
+
+	#code based on work by Xiaosong Yang starts here
+def iterate(baseString, numIterations, ruleDict):
+	''' following the rules, replace old characters with new ones
+
+	baseString		: start string
+	numIterations	: how many times the rules will be used
+	ruleDict		: the dictionary holding the rules
+	return			: return the final expanded string
+	'''
+	x = numIterations  #  Keeps a copy of the desired number of iterations
+	
+	while numIterations > 0:  #  this loop runs for each iteration required
+		replaced = ""
+		a=0
+		for i in baseString:  #  For each character in the string
+			if numIterations == 1 and (baseString[a] == 'X') :
+				replaced = replaced + ruleDict.get(i,i) + '*'  
+				''' This if statement is used to add an '*' which marks the end of each branch, which is
+				used later to place leaves at the ends of the necessary cylinders, but not the trunk'''
+			else:
+				replaced = replaced + ruleDict.get(i,i)  #  If the current iteration is not the end of the branch, no asterisk is added
+			a=a+1
+		baseString = replaced  #  Updates the string
+				
+		numIterations-=1
+	return baseString+'*'  #  Marks the top of the tree 
+	#code based on work by Xiaosong Yang starts here
+	
+def createNeedle(vector, Axis, branch, end):  #  Makes the needles for the pine trees
+	'''This function makes the needles on each section of the branch. If the current branch segment is at the end of a branch,
+	   a normal set of pine needles is created, and then an extra model is used additionally. The preset values in this function are 
+	   used to properly align the models and planes with the branches.
+	  vector	: the position of the branch segment
+	  Axis		: the axis of the current branch section
+	  branch	: the name of the current branch
+	  end		: boolean for whether the branch segment is at the end of the branch
+	  return	: the pine needles that have been created
+	'''
+
+	if (getVariable('Models', 3) == True):  #  checks the UI options selected for whether planes or imported models should be used
+
+		if end==True:  #  uses the variable 'end' to indicate if the current branch segment is at the end of the branch
+			try:
+				leaf = cmds.file(path+'/e.ma', i=True,rnn=True)   #  Imports the model for pine needles at the end of a branch
+			except:
+				print 'failed to import model, please ensure all models are in the maya folder'
+			cmds.select(leaf[len(leaf)-2][1:40])
+			cmds.move(vector[0]+0.06, vector[1]+0.02, vector[2]+0.05)
+			cmds.rotate(0,45,0)
+		else:		
+			try:
+				leaf = cmds.file(path+'/p.ma', i=True,rnn=True)   #  Imports the model for pine needles for normal branches
+			except:
+				print 'failed to import model, please ensure all models are in the maya folder'	
+			cmds.select(leaf[len(leaf)-2][1:40])
+			cmds.move(vector[0]-0.05, vector[1]+0.02, vector[2])  #  Moves the needles to the same position as the branch
+			cmds.rotate(0,45,0)
+		return leaf[len(leaf)-2][1:40]  #  If there has only been one model imported, the leaf name is returned.
+			#  The leaf name 
+	else:  #  else planes will be used for the needles
+		cmds.select(str(branch)+'.f[0]')
+		normal = cmds.polyInfo(fn=True)  #  queries the normal of the upwards-facing face of the branch cylinder
+		cmds.select(clear=True)
+		list = []
+	
+		'''This following section finds the relevant digits from the output of the polyInfo command  '''
+		for i in range (21, len(normal[0]), 1): # for each character in the string containing the branch normal
+			if normal[0][i] == '.':
+				list.append(i-1)  #  If the current character in the string is '.', the position in the string is added to a list
+		#The relative positions from the decimal point are used to indicate which characters to use for the axis when creating the plane
+		leaf = cmds.polyPlane(axis=[normal[0][list[0]]+normal[0][list[0]+1]+normal[0][list[0]+2]+normal[0][list[0]+3],normal[0][list[1]]+normal[0][list[1]+1]+normal[0][list[1]+2]+normal[0][list[1]+3],normal[0][list[2]]+normal[0][list[2]+1]+normal[0][list[2]+2]+normal[0][list[2]+3]],h = 0.15, w=0.15 , sx = 1, sy = 1) 
+		cmds.select(leaf[0])
+		cmds.move(vector[0]+0.03, vector[1]+0.05, vector[2]-0.03)
+		cmds.rotate(-45,90,0)
+		#A second plane is created and moved to the opposite side of the branch
+		leaf2 = cmds.polyPlane(axis=[normal[0][list[0]]+normal[0][list[0]+1]+normal[0][list[0]+2]+normal[0][list[0]+3],normal[0][list[1]]+normal[0][list[1]+1]+normal[0][list[1]+2]+normal[0][list[1]+3],normal[0][list[2]]+normal[0][list[2]+1]+normal[0][list[2]+2]+normal[0][list[2]+3]],h = 0.15, w=0.15 , sx = 1, sy = 1) 
+		cmds.select(leaf2[0])
+		cmds.move(vector[0]-0.03, vector[1]+0.05, vector[2]+0.03)
+		cmds.rotate(-45,0,0)
+		Leaf = cmds.group(leaf,leaf2, n='Leaf')
+		return Leaf
+
+def createLeaf(vector, Axis, rotation):  
+	'''Makes the leaves for the oak trees
+	  vector	: the position of the branch segment
+	  Axis		: the axis of the current branch section
+	  rotation	: the angle for the leaves
+	  return	: the leaves that have been created
+	'''
+	if (getVariable('Models', 3) == True):  #  If statement checks whether imported models are being used
+		try:
+			leaf = cmds.file(path+'/o.ma', i=True,rnn=True)   #  Imports the model for leaves
+		except:
+			print 'failed to import model, please ensure all models are in the maya folder'
+		cmds.select(leaf[len(leaf)-2][1:40])
+		cmds.move(vector[0], vector[1]+0.08, vector[2])
+		cmds.rotate(0,rotation,0, leaf)
+		return leaf[len(leaf)-2][1:40]
+	else:
+		leaf = cmds.polyPlane(axis=Axis, h = random.uniform(0.2,0.35), w = random.uniform(0.2,0.6), sx = 1, sy = 1) 
+		cmds.move(vector[0], vector[1]+0.08, vector[2])
+		return leaf[0]
+	
+	#code based on work by Xiaosong Yang starts here
+def createBranch(startPoint, length, angleX, angleZ, subdivisions):
+	''' create a cylinder for each branch
+	startPoint	: startPoint, base point for the new cylinder
+	length		: step size for growing
+	angleX		: the rotation angle for branching, used for calculating the axis of the cylinder
+	angleZ		: the rotation angle in the z direction
+	coord		: the coordinate for the terrain vertex the tree is on
+	subdivisions: the number of subdivisions along the cylinder's axis
+	return		: return the created object
+	'''
+	radiansX = angleX * math.pi /180.0  #  Converts the angles in degrees to radians
+	radiansZ = angleZ * math.pi /180.0
+	Axis = [length*math.sin(radiansX)*math.cos(radiansZ), length*math.cos(radiansX)*math.cos(radiansZ), length*math.sin(radiansZ)*math.cos(radiansX)]
+	branch = cmds.polyCylinder(axis=Axis, r=length/5.0, height=length, sa=subdivisions)
+	cmds.move(startPoint[0] + 0.5*math.sin(radiansX)*math.cos(radiansZ)*length, startPoint[1] + 0.5*math.cos(radiansX)*math.cos(radiansZ)*length, startPoint[2]+0.5*math.sin(radiansZ)*math.cos(radiansX)*length, spr=True)
+	return branch[0]
+
+def createPineBranch(startPoint, length, radiansX, radiansZ, coord, subdivisions, Axis):
+	''' create a cylinder for each branch
+
+	startPoint	: startPoint, base point for the new cylinder
+	length		: step size for growing
+	radiansX	: the rotation angle for branching, used for calculating the axis of the cylinder
+	radiansZ	: the rotation angle in the z direction
+	coord		: the coordinate for the terrain vertex the tree is on
+	subdivisions: the number of subdivisions along the cylinder's axis
+	Axis		: the axis along which the branch cylinder is made
+	return		: return the created object
+	'''
+	branch = cmds.polyCylinder(axis=Axis, r=(0.1+length)/10.0, height=length, sa=subdivisions)
+	cmds.move(startPoint[0] + 0.5*math.sin(radiansX)*math.cos(radiansZ)*length, startPoint[1] + 0.5*math.cos(radiansX)*math.cos(radiansZ)*length, startPoint[2]+0.5*math.sin(radiansZ)*math.cos(radiansX)*length, spr=True)
+	return branch[0]
+	
+
+def calculateVector( length, rotationX, rotationZ, axis):
+	'''calculate the vector from the start point to the end point for each branch
+
+	length		: step size for growing
+	rotationX	: the rotation angle for branching along the x axis	
+	rotationZ	: the rotation angle for branching along the z axis
+	axis		: used to reverse the y axis for pine branches
+	return		: return the vector from start point to end point
+	'''
+	radiansX = math.pi * rotationX / 180  #  converts angles in degrees to radians
+	radiansZ = math.pi * rotationZ / 180
+	return [length* math.sin(radiansX)*math.cos(radiansZ), axis*length* math.cos(radiansX)*math.cos(radiansZ), length* math.sin(radiansZ)*math.cos(radiansX)]	#cosZ the first time here is used to reduce the y splits
+
+def createModel(actionString, length, coord, vertex):
+	'''create the 3D model based on the actionString, following the characters in the string, 
+	one by one, grow the branches, add leaves, and finally group all branches together into one group
+
+		actionString	: instructions on how to construct the model
+		length			: step size for growing
+		coord			: the coordinate of the terrain vertex the tree is built at
+		vertex			: the terrain vertex number
+		return			: return the group of all the branches  and leaves
+	'''
+	inputString = actionString
+	index = 0		# Where at the input string we start from
+	angleX = 0		# Degrees, not radians
+	angleZ = 0
+	currentPoint = coord	# Start from the current terrain vertex
+	coordinateStack = []	# Stack where to store coordinates
+	XangleStack = []		# Stack to store angles
+	ZangleStack = []
+	branchList = []  # Stack of branches
+	leafList = []	# Stack of leaves
+	subdivisions = getVariable('subdivisions', 1)  # queries the number of subdivisions from the UI
+	Angle = getVariable('Angle', 1)  # queries the angle from the UI
+	deltaAngle = getVariable('AngleVariation', 1)  # queries the angle variation from the UI
+	angleChange = random.randint(-deltaAngle+20,deltaAngle)  # Randomises the branch angle based on the angle variation
+
+	while ( index < len( inputString ) ):  #  This loop is run for every character in the input string
+		
+		if inputString[index] == 'F':  #  If the current character is F, a branch is made and added to a list
+			branch = createBranch(currentPoint, length, angleX, angleZ, subdivisions)
+			branchList.append(branch)
+			vector = calculateVector( length, angleX, angleZ, 1)
+			newPoint = [currentPoint[0] + vector[0], currentPoint[1] + vector[1], currentPoint[2] + vector[2]]
+			currentPoint = newPoint	# update the position to go on growing from the new place
+		elif inputString[index] == '-':  #  If the current character is +, -, ! or &, the angle is changed 
+			angleX = angleX - Angle - angleChange
+		elif inputString[index] == '+':
+			angleX = angleX + Angle + angleChange
+		elif inputString[index] == '!':
+			angleZ = angleZ + Angle + angleChange
+		elif inputString[index] == '&':
+			angleZ = angleZ - Angle - angleChange
+		elif inputString[index] == '*':  #  If the current character is *, a leaf is made. It is called twice to make two perpendicular planes
+			#  A new namespace is made, using the number of leaves which already exist
+			cmds.namespace(set =':' + 'tree' + vertex + ':')	# The current namespace is set to th ecurrent tree
+			if (cmds.namespace(exists='leaves'+str(len(leafList)/2+1))==False):  #  checks if the namespace already exists to avoid clashes
+				cmds.namespace(add='leaves'+str(len(leafList)/2+1))  #  Creates a new namespace
+				cmds.namespace(set='leaves'+str(len(leafList)/2+1))  #  Sets the current namespace to the new namespace
+			Y = random.uniform(-0.25,0.25)  #  Used to add some randomisation to the leaf placement
+			rotation = random.randint(0, 45)
+			leaf = createLeaf(currentPoint, [1.0,Y,0.0], rotation)  #  This function is called twice to make two sets of leaves at right angles
+			leafList.append(leaf)
+			leaf = createLeaf(currentPoint, [0.0,Y,1.0], rotation)
+			leafList.append(leaf)   
+		elif inputString[index] == '[': # If the current character is [ add new branches, save the old position into the stack
+			coordinateStack.append( currentPoint )
+			XangleStack.append( angleX )
+			ZangleStack.append( angleZ )
+		elif inputString[index] == ']': # If the current character is [ finish the branches, get back to the root position
+			currentPoint = coordinateStack.pop()
+			angleX = XangleStack.pop()
+			angleZ = ZangleStack.pop()
+		index = index + 1  # Move to the next drawing directive
+		mel.eval("DeleteAllHistory;") # deletes history
+	groupName = [cmds.group(branchList, n = "trunk"), cmds.group(leafList, n = "leaves")]  #  Makes a list of the leaves and branches, and groups them
+	return groupName
+
+def createPine(actionString, length, coord, height, pine):
+	'''create the 3D model based on the actionString, following the characters in the string, 
+	one by one, grow the branches, and finally group all branches and needles together into one group.
+	This function creates several L-system 'trees', which are used as the individual branches of a larger pine tree.
+	
+	  actionString	: instructions on how to construct the model
+	  length		: step size for growing
+	  coord			: coordinates of the current terrain vertex
+	  height		: the number of rings of branches
+	  return		: return the group of all the branches
+	  pine			: the namespace for the whole tree
+	'''
+	inputString = actionString
+	index = 0		# Where at the input string we start from
+	
+	currentPoint = [0.0, 0.0, 0.0]
+	coordinateStack = []	# Stack where to store coordinates
+	XangleStack = []		# Stack to store angles
+	ZangleStack = []
+	branchList = []  # Stack of branch names
+	leafList = []	 # Stack of leaf names
+	subdivisions = getVariable('subdivisions', 1)  #  queries the number of axis subdivisions for the branch cylinders
+	Angle = getVariable('Angle', 1)  #  queries the branch angle
+	deltaAngle = getVariable('AngleVariation', 1)  # queries the amount of variation in branch angle
+	angleChange = random.randint(-deltaAngle+20,deltaAngle)  # Uses the angle variation to randomise
+	branchNum = 5 #  The numbeer of branches on each tier
+	heightY = coord[1] #The height of the vertex, used to calculate the height of each tier of branches
+	if height < 5:  #  The tallest trees have fewer branches per tier to ree computatioime
+		branchNum = random.randint(5,7)
+	else:
+		branchNum = 5 #  The numbeer of branches on each tier
+	for i in range (height):  #  Loops for each tier of branches
+		coord[1] = i*(0.28-i*0.01)+0.25+heightY  #  calculates the desired height for each tier of branches
+		#Values are carefully chosen to create the most aesthetically pleasing result
+		angleX = Angle	# Degrees, not radians, starting from Angle to rotate the branches away from vertical
+		angleY = 360.0/branchNum  #  the angle between the branches in the Y direction
+		angleZ = Angle
+		length = length*(1-height*0.01*i)  #  The length of the branch cylinders is varied by height so that the tree tapers
+		#Values are carefully chosen to create the most aesthetically pleasing result
+
+		for j in range (branchNum):  #  Loops for each branch on the current tier	
+			currentPoint = coord  #  The branch is set to start at the coordinate of the current terrain vertex
+			if j==0:  #  If this is the first branch of the current tier, the branch's Y coordinate is increased, based on the tier number i
+				currentPoint[1] = coord[1] + i*(0.1-i*0.005)
+				#Values are carefully chosen to create the most aesthetically pleasing result
+			index = 0
+			while ( index < len( inputString ) ):
+				if inputString[index] == 'F':  #  If the curent character is F, the axis is calculated and a branch and pair of needles created
+					radiansX = angleX * math.pi /180.0  #  The axis is calculated outside the function so it can be used in the createNeedle function
+					radiansZ = angleZ * math.pi /180.0
+					axis = -1  #  This reverses the Y direction of the branch, because the branches are not vertical
+					Axis = [length*math.sin(radiansX)*math.cos(radiansZ), axis*length*math.cos(radiansX)*math.cos(radiansZ), length*math.sin(radiansZ)*math.cos(radiansX)]
+					# The axis is calculated here instead of inside the createPineBranch function because it is also used in the createNeedle function
+					branch = createPineBranch(currentPoint, length, radiansX, radiansZ, coord, subdivisions, Axis)
+					branchList.append(branch)  # The name of the branch is added to a list
+					vector = calculateVector( length, angleX, angleZ, -1)
+					newPoint = [currentPoint[0] + vector[0], currentPoint[1] + vector[1], currentPoint[2] + vector[2]]
+					currentPoint = newPoint	# update the position to go on growing from the new place
+					cmds.namespace(set =':'+ 'tree' + pine+':')	# creates a new namespace
+					if (cmds.namespace(exists='needles'+str(len(leafList)+1))==False):
+						cmds.namespace(add='needles'+str(len(leafList)+1))
+						cmds.namespace(set='needles'+str(len(leafList)+1))
+					namespaceName = cmds.namespaceInfo(currentNamespace=True)
+					leaf = createNeedle(currentPoint, Axis, branch, False) #creates a pine needle for a normal branch
+					leafList.append(leaf)
+				elif (inputString[index] == '*') and (getVariable('Models', 3) == True): 
+					 #  If the current character is *, an end set of needlesis made if imported models are also being used
+					cmds.namespace(set =':'+ 'tree' + pine+':')	# creates a new namespace
+					if (cmds.namespace(exists='needles'+str(len(leafList)+1))==False):
+						cmds.namespace(add='needles'+str(len(leafList)+1))
+						cmds.namespace(set='needles'+str(len(leafList)+1))
+					rotation = random.randint(0, 45)
+					leaf = createNeedle(currentPoint, Axis, branch, True) # creates a needle for the end of the branch
+					leafList.append(leaf) # adds the new needles to the list
+				elif inputString[index] == '-':  #  If the current character is +, -, ! or &, the angle is changed 
+					angleX = angleX - Angle - angleChange
+				elif inputString[index] == '+':
+					angleX = angleX + Angle + angleChange
+				elif inputString[index] == '!':
+					angleZ = angleZ + Angle + angleChange
+				elif inputString[index] == '&':
+					angleZ = angleZ - Angle - angleChange
+				elif inputString[index] == '*':
+					Y = random.uniform(-0.25,0.25)
+					rotation = random.randint(0, 45)
+				elif inputString[index] == '[':  #  If the current character is [ add new branches, save the old position into the stack
+					coordinateStack.append( currentPoint )
+					XangleStack.append( angleX )
+					ZangleStack.append( angleZ )
+				elif inputString[index] == ']':  #  If the current character is ] finish the branches, get back to the root position
+					currentPoint = coordinateStack.pop()
+					angleX = XangleStack.pop()
+					angleZ = ZangleStack.pop()# Move to the next drawing directive
+				index = index + 1
+				mel.eval("DeleteAllHistory;") # deletes history
+			groupName = [cmds.group(branchList, n = "trunk"), cmds.group(leafList, n = "L")]
+			cmds.rotate(0.0, angleY, 0.0, groupName, pivot = coord)	 #  Rotates the current tier branches around the Y axis[0][1:16]
+			cmds.select(groupName)
+		Angle = Angle - 5  #  Makes the tiers taper towards the top, this is the most aesthetically pleasing value
+		cmds.rotate(0.0, random.uniform(10.0, angleY-10.0), 0.0, groupName, pivot = coord)  #Keeping the random number for rotation of each branch level 10 degrees away from 0 and Y makes sure there is always variation
+		#Values are carefully chosen to create the most aesthetically pleasing result	
+	if (getVariable('Models', 3) == True):  #  If statement checks whether imported models are being used
+		cmds.namespace(set =':'+ 'tree' + pine+':')	# creates a new namespace
+		if (cmds.namespace(exists='needles'+str(len(leafList)+1))==False):
+			cmds.namespace(add='needles'+str(len(leafList)+1))
+			cmds.namespace(set='needles'+str(len(leafList)+1))
+		try:
+			leaf = cmds.file(path+'/t.ma', i=True,rnn=True)   #  Imports the model for leaves
+		except:
+			print 'failed to import model, please ensure all models are in the maya folder'
+		cmds.select(leaf[len(leaf)-2][1:40])
+		cmds.move(coord[0], vector[1]+0.08+coord[1], coord[2])
+		leafList.append(leaf[len(leaf)-2][1:40])
+		groupName = [cmds.group(branchList, n = "trunk"), cmds.group(leafList, n = "L")]
+	return groupName
+	
+def setMaterial(objName, colour, materialType='lambert'):
+	'''Assigns a material to the object 'objectName'
+	objectName   : is the name of a 3D object in the scene
+	materialType : is string that specifies the type of the sufrace shader, 
+					this can be any of Maya's valid surface shaders such as:
+					lambert, blin, phong, etc.
+	colour	   : is a 3-tuple of (R,G,B) values within the range [0,1]
+					which specify the colour of the material
+	On Exit	   : 'objName' has been assigned a new material according to the 
+					input values of the procedure, and a tuple (of two strings) 
+					which contains the new shading group name, and the new shader
+					name is returned to the caller
+		'''
+	# create a new shading node
+	setName = cmds.sets(name='_MaterialGroup_', renderable=True, empty=True)
+	# create a new shading node
+	shaderName = cmds.shadingNode(materialType, asShader=True)
+	# change its colour
+	cmds.setAttr(shaderName+'.color', colour[0], colour[1], colour[2], type='double3')
+	# add to the list of surface shaders
+	cmds.surfaceShaderList(shaderName, add=setName)
+	# assign the material to the object
+	cmds.sets(objName, edit=True, forceElement=setName)
+	
+	
+def buildTree(coord, test, terrainGradient, averageHeight, vertex, *pArgs):
+	''' add the rules, initialise the control parameters, such as 
+	iteration numbers, branch rotation angle, step size of growing
+	 and calculate which tree type to create
+	coord			: the coordinates of the currrent terrain vertex
+	test			: the variable which indicates whether a single tree or a whole landscape,
+					   so that a single tree can be generated
+	terrainGradient	: the average difference between the current vertex and the four surrounding it,
+					  used to calculate the probability of a pine tree being generated
+	averageHeight	: the height of the central vertex of the terrain, which is used as an approximate
+					  average height of the terrain, used to calculate the probability of a pine tree
+	vertex			: the number of the current terrain vertex, used in namespaces  '''
+
+	# add the rules to the rule dictionary
+	ruleDictionary = {} # holding the rules (key, value)
+	actionString = ""	# the final action string to build the tree
+	addRule(ruleDictionary, "F", "FF" )
+	# set growing parameters
+	axiom = "X"
+	stepLength = 0.1
+	rotateAngle = 30
+
+	#code based on work by Xiaosong Yang ends here
+
+	stringA = "F[-X][&X]F[X]"  #  pine branch starting string
+	stringB = "F[-X][!X][&X][+X]F[X]"  #  Other tree starting strings
+	stringC = "F[[-X]&X][[+X]!X]F"
+	stringD = "[-X][!X][&X][+X]F"	
+	iterations = 0
+	pine = 0  #  by default, the tree type is oak
+	# queries relevant variables for populating the terrain with trees
+	if getVariable('NumIter', 3)==True:
+		iterations = 3
+	else:
+		iterations = 2
+	pineDensity = getVariable('PineDensity', 2)
+	oakDensity = getVariable('OakDensity', 2)
+	treeType = random.randint(0,100)  #  generates a random number, used to select a tree type
+	
+	if test == 1:  #  If only one tree is being generated, the scene is cleared here
+		clearProc()
+
+	if treeType <((terrainGradient+(coord[1]-averageHeight*0.9))*pineDensity*15) or test == 1:
+		print str(treeType) + ' pine chosen ' + str((terrainGradient+(coord[1]-averageHeight*0.9))*pineDensity*15) + ' B is ' +str(80*2*oakDensity)
+		#  If the vertex is above the h=average y value, or above the average of the four surrounding values, 
+		#the probability of a pine tree being generated increases. The user's input also affects this.
+		#Values are carefully chosen to create the most aesthetically pleasing result
+		addRule(ruleDictionary, "X", stringA)
+		iterations = 2
+		pine = 1  # Used to indicate whether this tree type has been selected
+	elif treeType < 60*oakDensity:  #  The remaining strings are chosen if the tree is not a pine
+		print str(treeType) + ' B chosen ' + str(40*oakDensity) + ' pine is ' + str((terrainGradient+(coord[1]-averageHeight*0.9))*pineDensity*15)
+		addRule(ruleDictionary, "X", stringB)
+	elif treeType < 80*oakDensity:
+		print str(treeType) + ' C ' + str(40*oakDensity)
+		addRule(ruleDictionary, "X", stringC)
+	elif treeType < 90*oakDensity:
+		print str(treeType) + ' D ' + str(40*oakDensity)
+		addRule(ruleDictionary, "X", stringD)
+	else:  #  stops the tree from being generated
+		iterations = 0
+	if test == 0 and iterations > 0:  #  If test is 0, the whole terrain is being generated
+		# create the action string
+		iter = random.randint(2,iterations)  #  The number of iterations is randomized to give variation
+		#Values below 2 are excluded because they don't produce a full tree
+	else:
+		iter = iterations  #  If only one tree is being generated, the number of iterations is not changed
+
+	if iter>1 and (test == 1 or  pineDensity + oakDensity > random.uniform(0.0,1.0)):
+		#  calculates whether a tree will be generated on this vertex, if test =1 and only one tree is being generated, this will always be true
+		#Values are carefully chosen to create the most aesthetically pleasing result
+		finalString=iterate(axiom, iter, ruleDictionary)
+		# create the 3D model
+		height = random.randint(3,5)
+		#Values are carefully chosen to create the most aesthetically pleasing result
+		
+		cmds.namespace(set = ':') # The current namespace is set to the root
+		if (cmds.namespace(exists = 'tree'+str(vertex)) == False): # checks if the current namespace already exists
+			cmds.namespace(add = 'tree'+str(vertex) ) # Creates a new namespace for the tree, using the vertex number to give it a unique name
+			cmds.namespace(set = 'tree'+str(vertex) ) # Sets the current namespace to the new namespace
+		if pine == 1: # uses the variable 'pine' to choose which function to call
+			modelGroup = createPine(finalString, stepLength, coord, height, str(vertex))
+			setMaterial(modelGroup[1], colour=(0.03, 0.2, 0.07))
+			setMaterial(modelGroup[0], colour=(0.2, 0.15, 0.05))
+		else:
+			modelGroup = createModel(finalString, stepLength, coord, str(vertex))
+			setMaterial(modelGroup[1], colour=(0.6, 1.0, 0.5))
+			setMaterial(modelGroup[0], colour=(0.4, 0.25, 0.1))
+		# set the colors for the trees
+		
+		Tree = cmds.group(modelGroup, n='Tree')
+		return Tree
+
+# This section builds terrain
+#######################################################################################################################################################################################################################################			
+
+	#code by Xiaosong Yang starts here
+def calculateSquareCentre( startXIndex, startYIndex, blockSize, width, terrainData, levelScale):
+	#update the centre
+	levelScale=1.0
+	x = random.uniform(-0.5,0.5)  #  adds extra randomisation to the terrain
+	terrainData[startXIndex+blockSize/2+(startYIndex+blockSize/2)*width] = 0.25*( \
+		terrainData[startXIndex           + startYIndex*width] + \
+		terrainData[startXIndex+blockSize + startYIndex*width] + \
+		terrainData[startXIndex           + (startYIndex+blockSize)*width] + \
+		terrainData[startXIndex+blockSize + (startYIndex+blockSize)*width])+ math.sqrt(levelScale)*x
+
+def calculateDiamondCentre( startXIndex, startYIndex, blockSize, width, height, terrainData, levelScale):
+	# update the diamond centre
+	levelScale=1.0
+	tmp = 0
+	count = 0;
+	if startXIndex>0:
+		tmp = tmp + terrainData[startXIndex-blockSize+startYIndex*width]
+		count=count+1
+	if startYIndex>0:
+		tmp = tmp + terrainData[startXIndex+(startYIndex-blockSize)*width]
+		count=count+1
+	if startXIndex<width-1:
+		tmp = tmp + terrainData[startXIndex+blockSize+startYIndex*width]
+		count=count+1
+	if startYIndex<height-1:
+		tmp = tmp + terrainData[startXIndex+(startYIndex+blockSize)*width]
+		count=count+1
+	terrainData[startXIndex+startYIndex*width] = tmp/count + math.sqrt(levelScale)*random.random()
+
+	#code by Xiaosong Yang ends here
+
+	#code based on work by Xiaosong Yang starts here
+def terrain():
+	#  clears the scene
+	clearProc()
+	terrainProgress = cmds.progressBar(width=200, maxValue=100,visible=True)
+	
+	planeSize = getVariable('PlaneSize', 1)  #  queries the plane size value from the UI
+	#  calculates vaues for creating the plane for th terrain
+	subdx = subdy = planeSize -2
+	n = planeSize/4
+	subdx = subdy = 2 ** n 
+	width = height =  subdx + 1
+	stepSize = (subdx+1)/100.0
+	
+	terrain = cmds.polyPlane( axis=[0,1,0], w=planeSize*subdy*0.06, h=planeSize*subdx*0.06, sx=subdx, sy=subdy, ch=False)
+	# initialise the terrain height data
+	terrainData = [0.0]*width*height
+	# the four corners
+	terrainHeight = getVariable('Height', 2)  #  queries the y value to use for the initial values of the plane corners
+	terrainData[0] = terrainHeight  #  The first corner is set to the user's height input
+	terrainData[width-1] = 2.0 + random.uniform(0.0,terrainHeight-2.0)  #  The second corner is slightly randomized, close to the user's input
+	terrainData[(height-1)*width] = 0.6  #  The third and fourth corners are set to slightly above 0
+	terrainData[height*width-1] =0.6
+	#Values are carefully chosen to create the most aesthetically pleasing result
+
+	#code based on work by Xiaosong Yang ends here
+	#code by Xiaosong Yang starts here
+	# Calculates the values for each terrain vertex
+	for i in range(n, 0, -1): # different resolution
+		blockSize = 2**i
+		# for each resolution level, we need to calculate the height level for many blocks
+		# calculate the square centre
+		num = 2**(n-i)
+		for j in range(num):
+			startXIndex = j * blockSize
+			for k in range(num):
+				startYIndex = k * blockSize
+				calculateSquareCentre(startXIndex, startYIndex, blockSize, width, terrainData, 1.0*i/n)
+		num = 2**(n-i+1)+1
+		for j in range(num):
+			startXIndex = j * blockSize/2
+			for k in range(num):
+				startYIndex = k * blockSize/2
+				if (j+k)%2==1:
+					calculateDiamondCentre(startXIndex, startYIndex, blockSize/2, width, height, terrainData, 1.0*i/n)
+	#code by Xiaosong Yang ends here
+
+	terrainChange = 0.02  #  The amount the terrain is modified
+	for i in range(1,height-1,1):  #  Loops for each vertex in the terrain
+		for j in range(1,width-1,1):
+			if (terrainData[i*width+j]+0.25<(terrainData[(i-1)*width+j]+terrainData[(i+1)*width+j]+terrainData[i*width+j-1]+terrainData[i*width+j+1])*0.25):
+				#  If the current vertex is greater than the average of the surrounding vertices, the current vertex
+				# is greatly raised, and the surrounding vertices are raised slightly, to make the peaks sharper
+				terrainData[i*width+j] = terrainData[i*width+j]+random.uniform(-terrainChange,terrainChange*30)#################
+				terrainData[(i-1)*width+j] += random.uniform(0,terrainChange)
+				terrainData[(i+1)*width+j] += random.uniform(0,terrainChange)
+				terrainData[i*width+j-1] += random.uniform(0,terrainChange)
+				terrainData[i*width+j+1] += random.uniform(0,terrainChange)
+			if terrainData[i*width+j]>(terrainData[(i-1)*width+j] and terrainData[i*width+j]>terrainData[(i+1)*width+j] and terrainData[i*width+j]>terrainData[i*width+j-1] and terrainData[i*width+j]>terrainData[i*width+j+1]):
+				#  If the current vertex is greater than each of the surrounding vertices, the current vertex is raised
+				terrainData[i*width+j] = terrainData[i*width+j]+random.uniform(0.12,terrainChange*20)
+			if terrainData[i*width+j]<(terrainData[(i-1)*width+j] and terrainData[i*width+j]<terrainData[(i+1)*width+j] and terrainData[i*width+j]<terrainData[i*width+j-1] and terrainData[i*width+j]<terrainData[i*width+j+1]):
+				#  If the current vertex is less than than each of the surrounding vertices, the current vertex
+				# is raised, and the surrounding vertices are lowered slightly, to smooth the valleys
+				terrainData[i*width+j] = terrainData[i*width+j]+random.uniform(0.12,terrainChange*20)
+				terrainData[i*width+j] = terrainData[i*width+j]+random.uniform(-0.015,terrainChange*20)
+				terrainData[(i-1)*width+j] -= random.uniform(0,terrainChange)
+				terrainData[(i+1)*width+j] -= random.uniform(0,terrainChange)
+				terrainData[i*width+j-1] -= random.uniform(0,terrainChange)
+				terrainData[i*width+j+1] -= random.uniform(0,terrainChange)
+	
+	# change the vertex position of the plan according to the terrainData
+	for i in range(height):
+		for j in range(width):
+			cmds.move(0, terrainData[i*width+j], 0, terrain[0]+".vtx["+str(i*width+j)+"]", r=True)
+	
+	cmds.polySmooth()  #  Subdivides and smooths the terrain plane
+	cmds.progressBar(terrainProgress, edit = True, step = 1)
+	for i in range(height-1):  #  -1 is used so that these loops do not allow trees to be generated on the edge of the plain
+		for j in range(width-1):
+			# Finds the coordinate of the current vertex
+			coord = cmds.xform(str(terrain[0])+'.vtx['+str(i*width+j)+']', query=True, translation=True, worldSpace=True) 
+			if i>0 and j>0 and (terrainData[i*width+j]>(terrainData[(i-1)*width+j] or terrainData[i*width+j]>terrainData[(i+1)*width+j] or terrainData[i*width+j]>terrainData[i*width+j-1] or terrainData[i*width+j]>terrainData[i*width+j+1])):
+				''' This if statement is used to only create trees on vertices not on the edge of the plain (i>0 and j>0).
+					It also only allows a tree to be generated if at least one of the adjacent vertices is lower than the current vertex.
+					This is done for aesthetic reasons, as trees on the very edge of the plane look odd, and trees on a vertex lower than
+					all of its neighbours look bad because the trunk is hidden in the terrain geometry'''
+				# The average of the differences between the current vertex and the surrounding vertices are calculated
+				terrainGradient = 4*terrainData[i*width+j]-terrainData[(i-1)*width+j]-terrainData[(i+1)*width+j]-terrainData[i*width+j-1]-terrainData[i*width+j+1]
+				if terrainData[i*width+j]>(terrainData[(i-1)*width+j] and terrainData[i*width+j]>terrainData[(i+1)*width+j] and terrainData[i*width+j]>terrainData[i*width+j-1] and terrainData[i*width+j]>terrainData[i*width+j+1]):
+					#  If any of the surrounding vertices are less than the current vertex, the difference is doubled
+					terrainGradient = terrainGradient*2
+				averageHeight = terrainData[len(terrainData)/2]  #  The height of the central vertex is taken as the average height value
+				Tree = buildTree(coord, 0, terrainGradient, averageHeight, i*width+j)  #  A tree is built
+		cmds.progressBar(terrainProgress, edit = True, step = 100/subdx)
+				#cmds.group(Tree, n= 'forest')	
+	cmds.progressBar(terrainProgress, edit=True, endProgress=True)
+	setMaterial(terrain, colour=(0.2, 0.7, 0.2))
+	
+
+# main program, start with the function buildTree()
+if __name__ == "__main__":
+	checkUI()
+	createUI()
+
